@@ -37,15 +37,17 @@
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 
-#define SAVESYNC_VERSION "1.0.0"
+#define SAVESYNC_VERSION "1.1.0"
 
 static constexpr int kSyncPort = 21331;
-static constexpr uint8_t kProtoVersion = 1;
+static constexpr uint8_t kProtoVersion = 2;
 static constexpr size_t kChunkSize = 256 * 1024;  // Steam's max message is 512 KB
 static constexpr uint64_t kMaxFileSize = 128ull * 1024 * 1024;
 static constexpr const char* kSyncPrefix = "sync-";
 static constexpr int kMaxReconnects = 5;
-static const char* const kExts[] = {".scop", ".scoc", ".dds"};
+// .xrr_peers is xrRazom's per-client character data for that save.
+static const char* const kExts[] = {".scop", ".scoc", ".dds", ".xrr_peers"};
+static constexpr uint8_t kNumExts = 4;
 
 // ---------------------------------------------------------------- logging
 
@@ -272,8 +274,8 @@ struct FileStamp {
     bool operator==(const FileStamp& o) const { return size == o.size && mtime == o.mtime; }
 };
 struct SaveStamp {
-    FileStamp scop, scoc;
-    bool operator==(const SaveStamp& o) const { return scop == o.scop && scoc == o.scoc; }
+    FileStamp scop, scoc, peers;
+    bool operator==(const SaveStamp& o) const { return scop == o.scop && scoc == o.scoc && peers == o.peers; }
 };
 static std::map<std::string, SaveStamp> g_known;    // stem -> last stamp we've seen and handled
 static std::map<std::string, SaveStamp> g_pending;  // stem -> changed, waiting until it stops changing
@@ -295,7 +297,8 @@ static std::map<std::string, SaveStamp> ScanSaves() {
         std::string stem = e.path().stem().u8string();
         if (StartsWith(stem, kSyncPrefix)) continue;  // never re-share saves we received
         fs::path base = g_saveDir / e.path().stem();
-        out[stem] = {Stamp(fs::path(base).concat(".scop")), Stamp(fs::path(base).concat(".scoc"))};
+        out[stem] = {Stamp(fs::path(base).concat(".scop")), Stamp(fs::path(base).concat(".scoc")),
+                     Stamp(fs::path(base).concat(".xrr_peers"))};
     }
     return out;
 }
@@ -316,7 +319,7 @@ static bool SendReliable(HSteamNetConnection conn, const Writer& w) {
 
 static void SendSave(const std::string& stem, const std::vector<HSteamNetConnection>& to) {
     std::vector<std::pair<uint8_t, std::vector<uint8_t>>> files;
-    for (uint8_t i = 0; i < 3; ++i) {
+    for (uint8_t i = 0; i < kNumExts; ++i) {
         fs::path p = fs::path(g_saveDir / fs::u8path(stem)).concat(kExts[i]);
         std::vector<uint8_t> data;
         if (!fs::exists(p)) continue;
@@ -466,12 +469,12 @@ static void HandleMessage(const uint8_t* data, size_t size) {
         uint16_t hostLen = r.get<uint16_t>();
         uint16_t stemLen = r.get<uint16_t>();
         uint8_t count = r.get<uint8_t>();
-        if (count == 0 || count > 3) return;
+        if (count == 0 || count > kNumExts) return;
         std::vector<Incoming::File> files(count);
         for (auto& f : files) {
             f.ext = r.get<uint8_t>();
             f.size = r.get<uint64_t>();
-            if (f.ext > 2 || f.size > kMaxFileSize) return;
+            if (f.ext >= kNumExts || f.size > kMaxFileSize) return;
         }
         std::string host = r.str(hostLen);
         std::string stem = r.str(stemLen);
