@@ -1,5 +1,7 @@
 # stalker-savesync
 
+> **⚠️ Not working yet — don't use it.** Taking over hosting from a synced save currently loses the original host's character. Being fixed.
+
 When the host saves, everyone in the co-op game gets a copy of that save.
 Anyone can then load it and host next time.
 
