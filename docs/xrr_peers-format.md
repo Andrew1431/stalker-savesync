@@ -1,61 +1,85 @@
-# .xrr_peers format (reverse-engineered, partial)
+# .xrr_peers format (v15)
 
 xrRazom writes `<save>.xrr_peers` next to each `.scop`. It holds every
 *client's* character; the host's character lives in the `.scop` as usual.
-Decoded from 7 sample files (versions 12 and 15). Little-endian, strings are
-NUL-terminated unless noted. **?** = guessed.
 
-## Header
+`tools/xrr_peers.py` reads and writes this format. All 5 local v15 samples
+re-encode **byte-identical** (`python tools/xrr_peers.py check <files>`).
+v12 (older xrRazom) differs and is not supported.
 
-| type     | field                         |
-|----------|-------------------------------|
-| char[4]  | `XPRR`                        |
-| u32      | version (12, 15 seen)         |
-| u32      | peer count                    |
+Little-endian. `cstr` = NUL-terminated, `lstr` = u16 length + bytes.
 
-## Peer record
+## File
 
-| type      | field | notes |
-|-----------|-------|-------|
-| cstr      | player name | xrRazom identity = name from its settings |
-| u64       | id | v15: SteamID64. v12: 8-byte LAN id (cf. `appdata/xrrazom_lan_id.bin`) |
-| cstr      | faction | `stalker`, `freedom`, ... |
-| cstr      | visual | e.g. `actors\stalker_freedom\stalker_freedom_0.ogf` |
-| cstr      | outfit section | empty if none |
-| cstr      | helmet section | empty if none |
-| cstr      | PDA section | |
-| cstr      | torch section | |
-| cstr      | active weapon section | |
-| u32       | ? active slot | 3 in v12 sample, 0 in v15 |
-| cstr      | level name | `k00_marsh`, `l02_garbage` |
-| f32 x3    | position | |
-| f32 ...   | ? direction / health | v12: two floats + `1.0` + u32 0 |
-| u32       | money | 5000 / 1148 |
-| cstr x4   | quick slots | `medkit`, `bandage`, `medkit_army`, ... |
-| ...       | item count | v12: u8 + u16 (46); v15: u8 + u16 (121) |
-| item[]    | inventory | see below |
-| cstr      | stats | `arena_battles:0;...;wounded_helped:0\|<level>` |
-| cstr      | needs | `sat:0.963;drink:240;sleep:240;rad:0.000` |
-| kv list   | flags | e.g. `xrr_imsleep=200` |
-| table     | limb health | `health.head`, `timedhp.torso`, ... |
-| u32 + blob| `m_data` | serialized Lua table: skills, psy, disguise, mods' data |
-| table     | `__xrr_meta` | timestamps / save reason (v12) |
+| type    | field |
+|---------|-------|
+| char[4] | `XPRR` |
+| u32     | version (15) |
+| u32     | peer count |
+| peer[]  | |
 
-## Item record (v12)
+## Peer
 
-`u16 index, u16 0x007e?, cstr section, u16 count/ammo, f32 condition,
-u32 ?, u8 slot/flags?, ...` then, for weapons/outfits with parts, an inline
-Lua-style table (`parts` → `prt_w_barrel_2 = 96.0` ...).
+| type | field | notes |
+|------|-------|-------|
+| cstr | name | xrRazom identity = player name from its settings |
+| u64  | SteamID64 | |
+| cstr | faction | `freedom`, `stalker`, ... |
+| cstr | visual | `actors\stalker_freedom\stalker_freedom_0.ogf` |
+| cstr ×6 | outfit, helmet, PDA, torch, active weapon | sections, empty if none |
+| u32  | active slot | |
+| cstr | level | `k02_trucks_cemetery` |
+| f32 ×3 | position | |
+| f32 ×2 | ? angles | |
+| f32  | health | 0..1 |
+| u32  | ? | always 0 |
+| u32  | money | |
+| cstr ×4 | quick slots | |
+| u8   | ? | always 1 |
+| u16 + item[] | inventory | |
+| i32  | reputation | |
+| i32  | rank | |
+| u16 + (u8, i32)[] | faction goodwill | (community index, value) |
+| u16 + (u16, i32)[] | NPC relations | (NPC object id, value) |
+| cstr | stats | `arena_battles:0;...|visited,levels` |
+| cstr | needs | `sat:0.909;drink:540;sleep:540;rad:0.000` |
+| u8   | ? | always 0 |
+| u16 + (cstr, cstr)[] | flags | `xrr_imsleep=500` |
+| u16 + sized[] | limb health | `health.head`, `timedhp.torso`, ... |
+| u16 + sized[] | actor `m_data` | skills, psy, disguise, mod data |
+| u64 ×2 | game times (ms) | |
 
-## Value encoding inside tables (v12)
+`sized` = cstr key, u16 byte length, typed value.
 
-`03 <u16 len> <bytes>` = string key/value, `02 <f64>` = number,
-`04 <u16 count>` = table, `01 <u8>` = bool. v15 changed this layout
-(keys became plain cstrs with a trailing type byte) — needs more samples.
+## Item
+
+| type | field |
+|------|-------|
+| u32  | object id (on the host) |
+| cstr | section |
+| u16  | count (ammo boxes) |
+| f32  | condition |
+| u32  | rounds in magazine |
+| u8   | slot index (when place = 1) |
+| u8   | place: 1 slot, 2 belt, 3 backpack |
+| u8   | uses left |
+| u8   | ? always 0 |
+| u8   | has data; if 1: u16 byte length, u16 count, (lstr key, typed value)[] |
+| u16  | ? always 0 |
+
+Item data keys seen: `m_data`, `parts` (weapon/outfit part conditions),
+`healing_charge`.
+
+## Typed values (Lua data)
+
+`01 u8` bool · `02 f64` number · `03 lstr` string ·
+`04 u16 n` table of n (typed key, typed value) pairs.
 
 ## Takeaways
 
-- It's a high-level character snapshot (sections + conditions + Lua data),
-  not engine objects, so it can be generated from a live actor in Lua.
-- The format changes between xrRazom versions; any tool must check the
-  version and refuse unknown ones.
+- It's a high-level character snapshot (sections, conditions, Lua data), not
+  engine objects, so it can be built from a live actor in Lua and applied back.
+- Item object ids refer to the host's world; a converted record would need
+  fresh ids (or xrRazom may reassign them; untested).
+- Still unknown: the two angle floats, a few always-0/1 bytes, and whether the
+  two game times are "saved at" / "last synced".
