@@ -87,7 +87,7 @@ class Writer:
             raise TypeError(type(v))
 
 
-# Sized entry: cstr key, u16 byte length, typed value (used for limb health and m_data).
+# Sized entry: cstr key, u16 byte length, typed value (used for actor pstor and m_data).
 def read_sized(r):
     key = r.cstr()
     n = r.take("<H")
@@ -181,7 +181,7 @@ def read_peer(r):
     p["needs"] = r.cstr()
     p["unk_u8_flags"] = r.take("<B")
     p["flags"] = [[r.cstr(), r.cstr()] for _ in range(r.take("<H"))]
-    p["limbs"] = [read_sized(r) for _ in range(r.take("<H"))]
+    p["pstor"] = [read_sized(r) for _ in range(r.take("<H"))]
     p["m_data"] = [read_sized(r) for _ in range(r.take("<H"))]
     p["game_times"] = r.take("<2Q")  # X-Ray game time (ms); saved / last update?
     return p
@@ -213,8 +213,8 @@ def write_peer(w, p):
     for k, v in p["flags"]:
         w.cstr(k)
         w.cstr(v)
-    w.put("<H", len(p["limbs"]))
-    for e in p["limbs"]:
+    w.put("<H", len(p["pstor"]))
+    for e in p["pstor"]:
         write_sized(w, e)
     w.put("<H", len(p["m_data"]))
     for e in p["m_data"]:

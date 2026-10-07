@@ -45,7 +45,7 @@ Little-endian. `cstr` = NUL-terminated, `lstr` = u16 length + bytes.
 | cstr | needs | `sat:0.909;drink:540;sleep:540;rad:0.000` |
 | u8   | ? | always 0 |
 | u16 + (cstr, cstr)[] | flags | `xrr_imsleep=500` |
-| u16 + sized[] | limb health | `health.head`, `timedhp.torso`, ... |
+| u16 + sized[] | actor pstor (save_var store) | `health.head`, `timedhp.torso`, `next_clean`, `s_kill_count`, ... sorted |
 | u16 + sized[] | actor `m_data` | skills, psy, disguise, mod data |
 | u64 ×2 | game times (ms) | |
 

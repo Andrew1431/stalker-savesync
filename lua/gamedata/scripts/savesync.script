@@ -183,8 +183,8 @@ function encode_peer(p)
 	w:u8(p.unk_u8_flags)
 	w:u16(#p.flags)
 	for _, kv in ipairs(p.flags) do w:cstr(kv[1]) w:cstr(kv[2]) end
-	w:u16(#p.limbs)
-	for _, kv in ipairs(p.limbs) do w:sized(kv[1], kv[2]) end
+	w:u16(#p.pstor)
+	for _, kv in ipairs(p.pstor) do w:sized(kv[1], kv[2]) end
 	w:u16(#p.m_data)
 	for _, kv in ipairs(p.m_data) do w:sized(kv[1], kv[2]) end
 	w:u64(p.game_times[1])
@@ -343,8 +343,8 @@ function decode_peer(s, pos)
 	p.unk_u8_flags = r:u8()
 	p.flags = {}
 	for i = 1, r:u16() do p.flags[i] = { r:cstr(), r:cstr() } end
-	p.limbs = {}
-	for i = 1, r:u16() do p.limbs[i] = r:sized() end
+	p.pstor = {}
+	for i = 1, r:u16() do p.pstor[i] = r:sized() end
 	p.m_data = {}
 	for i = 1, r:u16() do p.m_data[i] = r:sized() end
 	p.game_times = { r:u64(), r:u64() }
@@ -485,12 +485,15 @@ function collect_peer()
 	end
 	table.sort(goodwill, function(a, b) return a[1] < b[1] end)
 
-	local limbs = {}
-	for _, prefix in ipairs({ "health.", "timedhp." }) do
-		for _, limb in ipairs(LIMBS) do
-			local v = utils_obj.load_var(actor, prefix .. limb)
-			if type(v) == "number" then limbs[#limbs + 1] = { prefix .. limb, v } end
+	-- The actor's pstor (save_var store): limb health, drug timers, counters...
+	local pstor = {}
+	local src = xrr_get_actor_pstor and xrr_get_actor_pstor()
+	if type(src) == "table" then
+		for k, v in pairs(src) do
+			local tv = type(k) == "string" and to_typed(v, MAX_DEPTH) or nil
+			if tv ~= nil then pstor[#pstor + 1] = { k, tv } end
 		end
+		table.sort(pstor, function(a, b) return a[1] < b[1] end)
 	end
 
 	-- Peer-owned m_data keys, as xrRazom carries them (xrr_peer_mdata.manifest).
@@ -549,7 +552,7 @@ function collect_peer()
 		needs = xrr_net_client and xrr_net_client.xrr_collect_condition_blob() or "",
 		unk_u8_flags = 0,
 		flags = {},
-		limbs = limbs,
+		pstor = pstor,
 		m_data = mdata,
 		game_times = { 0, 0 },  -- filled in by savesync.dll from the other records
 	}
@@ -634,6 +637,8 @@ local function finish_items(pending)
 		if obj then
 			step("item " .. it.section, function()
 				for _, u in ipairs(it.upgrades) do obj:install_upgrade(u) end
+				-- Parts-based items recompute condition on spawn; put ours back.
+				obj:set_condition(it.condition)
 				if it.ammo_in_mag > 0 and IsWeapon(obj) then
 					obj:set_ammo_type(floor(it.ammo_in_mag / 65536))
 					obj:set_ammo_elapsed(it.ammo_in_mag % 65536)
@@ -668,6 +673,8 @@ local function apply_items(p)
 			if it.uses > 0 then t.uses = it.uses end
 			if it.section:find("^ammo_") then t.ammo = it.count end
 			local se = alife_create_item(it.section, db.actor, t)
+			-- Ammo comes back as a list of boxes rather than one server object.
+			if type(se) == "table" and not se.id then se = se[1] end
 			if not se then error("alife_create_item returned nil") end
 			spawned = spawned + 1
 			for _, kv in ipairs(it.data or {}) do
@@ -723,8 +730,21 @@ local function apply_character(p)
 	step("health", function()
 		if actor.set_health_ex then actor:set_health_ex(p.health) end
 	end)
-	step("limbs", function()
-		for _, kv in ipairs(p.limbs) do utils_obj.save_var(actor, kv[1], to_native(kv[2])) end
+	step("pstor", function()
+		local vals = {}
+		for _, kv in ipairs(p.pstor) do
+			vals[kv[1]] = to_native(kv[2])
+			utils_obj.save_var(actor, kv[1], vals[kv[1]])
+		end
+		-- Body Health System keeps limb health in module tables and saves them back
+		-- over pstor, so update those too (same keys its LoadHealthStatus reads).
+		local bhs = zzz_player_injuries
+		if bhs and bhs.health and bhs.timedhp then
+			for _, limb in ipairs(LIMBS) do
+				if vals["health." .. limb] then bhs.health[limb] = vals["health." .. limb] end
+				if vals["timedhp." .. limb] then bhs.timedhp[limb] = vals["timedhp." .. limb] end
+			end
+		end
 	end)
 	if xrr_net_client then
 		step("stats", function() xrr_net_client.OnPeerStatsRestore(p.stats) end)
@@ -743,6 +763,7 @@ local function try_apply()
 	local path = app_path(APPLY_PREFIX .. loaded_id .. ".bin")
 	local s = read_file(path)
 	if not s then return end
+	if s:sub(1, 4) == "DONE" then return end
 	if s:sub(1, 4) ~= "SSAP" then
 		printe("![savesync] %s is not an apply file", path)
 		return
@@ -758,11 +779,16 @@ local function try_apply()
 		return
 	end
 
+	-- Apply only once, and mark it first so a failure part-way can't re-run the item
+	-- swap on reload. Anomaly's Lua has no os.rename/os.remove, so overwrite the file.
+	local f = io.open(path, "wb")
+	if f then
+		f:write("DONE")
+		f:close()
+	end
 	log("taking over this save as '%s' (%s items, money %s, rank %s)", p.name, #p.items, p.money, p.rank)
 	apply_character(p)
 	apply_items(p)
-	-- Only once: later loads of this save (or saves made from it) keep the result.
-	os.rename(path, path .. ".done")
 end
 
 local function on_load_state(m)
