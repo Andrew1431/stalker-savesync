@@ -702,14 +702,18 @@ local function patch_save(path, add)
 	if write_file(path, data) then log("wrote %s into %s (%s players)", table.concat(names_of(add), ", "), path, n) end
 end
 
+local collecting -- collect_peer fires save_state itself; don't recurse into it
+
 local function on_save_state()
-	if not db.actor then return end
+	if collecting or not db.actor then return end
 	if XrrIsClient and XrrIsClient() then return end
 	local me = my_name()
 	if me == "" then return end
 
 	-- Collect now, while the actor is exactly what's being saved.
+	collecting = true
 	local okc, record = pcall(function() return encode_peer(collect_peer(me)) end)
+	collecting = false
 	if not okc then
 		printe("![savesync] collecting own character failed: %s", tostring(record))
 		return
@@ -929,7 +933,11 @@ local function try_take_over(owner)
 	-- Saved without savesync, so the old host's character is only the actor:
 	-- keep it as a client record, then save and load once, because xrRazom only
 	-- reads .xrr_peers on load and the old host needs it there to rejoin.
-	captured = { name = owner, record = encode_peer(collect_peer(owner)) }
+	collecting = true
+	local okc, record = pcall(function() return encode_peer(collect_peer(owner)) end)
+	collecting = false
+	if not okc then error(record, 0) end
+	captured = { name = owner, record = record }
 	apply_character(mine)
 	apply_items(mine, function()
 		log("saved without savesync; saving and reloading so '%s' can rejoin as themselves", owner)
