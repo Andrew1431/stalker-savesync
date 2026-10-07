@@ -1,16 +1,19 @@
 --[[
   stalker-savesync: lets anyone in the group host a co-op save.
 
-  xrRazom keeps every client's character in <save>.xrr_peers (keyed by player
-  name), but the host's own character only exists inside the .scop. So:
+  xrRazom keeps every client's character in <save>.xrr_peers (keyed by xrRazom
+  player name), but the host's own character only exists inside the save as the
+  actor, whose character name is the host's xrRazom name.
 
-  - On every save, the host also writes their own character into that save's
-    .xrr_peers (same record format xrRazom uses, see docs/xrr_peers-format.md)
-    and stamps m_data.savesync_owner = their name.
-  - On load, if the save belongs to someone else and our name is in its
-    .xrr_peers, we were a client in it: that record is applied to the actor,
-    turning the inherited character into ours. The old host's character is
-    already in .xrr_peers for when they join.
+  When you load a save someone else hosted and your name is in its .xrr_peers:
+  - the inherited actor (the old host's character) is turned into a client
+    record under their name,
+  - your record is applied to the actor, so you play your own character,
+  - the game saves and reloads once, which writes the old host's record into
+    .xrr_peers (xrRazom only reads that file on load), so they can join with
+    their own character.
+  On every save the host's own stale record is dropped from .xrr_peers.
+  Record format: docs/xrr_peers-format.md.
 ]]
 
 local MAX_DEPTH = 8  -- same table depth limit xrRazom's codecs use
@@ -453,7 +456,8 @@ local function collect_item(item, slots, mdata_keys, m)
 	}
 end
 
-function collect_peer()
+-- name: the xrRazom name to record this character under.
+function collect_peer(name)
 	local actor = db.actor
 	local m = alife_storage_manager.get_state()
 
@@ -520,7 +524,7 @@ function collect_peer()
 	local heading = actor:direction():getH()
 
 	return {
-		name = get_console_cmd(0, "xrr_player_name") or "",
+		name = name,
 		steamid = 0,  -- filled in by savesync.dll
 		faction = get_actor_true_community(),
 		visual = visual,
@@ -632,61 +636,58 @@ function peers_bytes(peers)
 	return w:bytes()
 end
 
------------------------------------------------------------------- on save: write our own record
+------------------------------------------------------------------ on save: keep .xrr_peers right
 
-local saving_name    -- from the "save <name>" console command, if we saw it
-local pending_record -- our character, collected when save_state fired
+local saving_name   -- from the "save <name>" console command, if we saw it
+local captured = {} -- old hosts' characters taken over this session: name -> record bytes
 
--- Returns the peers file bytes with our record replacing any old one. SteamID and
--- game times can't round-trip a Lua number, so they're copied as raw bytes from
--- records already in the file.
-function with_own_record(s, record, me)
+-- Returns peers file bytes with `me` (the host, who doesn't belong there) removed
+-- and each record in `add` (name -> bytes) inserted, replacing same-name ones.
+-- SteamID and game times can't round-trip a Lua number, so they're copied as raw
+-- bytes from records already in the file.
+function patched_peers(s, me, add)
 	local peers, err = read_peers_string(s)
 	if not peers then return nil, err end
-	local name_len = #me + 1
-	local steamid = string.rep("\0", 8)
-	local times
+	local steamids, times = {}, nil
 	local out = {}
 	for _, p in ipairs(peers) do
-		if p.name == me then
-			steamid = p.raw:sub(name_len + 1, name_len + 8)
-		else
+		steamids[p.name] = p.raw:sub(#p.name + 2, #p.name + 9)
+		if p.name ~= me and not add[p.name] then
 			times = times or p.raw:sub(-16)
 			out[#out + 1] = p
 		end
 	end
-	local raw = record:sub(1, name_len) .. steamid .. record:sub(name_len + 9)
-	if times then raw = raw:sub(1, -17) .. times end
-	out[#out + 1] = { name = me, raw = raw }
+	local names = {}
+	for name in pairs(add) do names[#names + 1] = name end
+	table.sort(names)
+	for _, name in ipairs(names) do
+		local rec, n = add[name], #name + 1
+		local raw = rec:sub(1, n) .. (steamids[name] or string.rep("\0", 8)) .. rec:sub(n + 9)
+		if times then raw = raw:sub(1, -17) .. times end
+		out[#out + 1] = { name = name, raw = raw }
+	end
 	return peers_bytes(out), #out
 end
 
-local function insert_own_record(path, record, me)
-	local data, n = with_own_record(read_file(path), record, me)
+local function patch_save(path, me)
+	local data, n = patched_peers(read_file(path), me, captured)
 	if not data then
 		printe("![savesync] not touching %s: %s", path, tostring(n))
 		return
 	end
-	if write_file(path, data) then log("wrote own character into %s (%s players)", path, n) end
+	if write_file(path, data) then log("updated %s (%s players)", path, n) end
 end
 
-local function on_save_state(m)
+local function on_save_state()
 	if not db.actor then return end
 	if XrrIsClient and XrrIsClient() then return end
 	local me = my_name()
 	if me == "" then return end
 
-	m.savesync_owner = me
-	local ok, err = pcall(function() pending_record = encode_peer(collect_peer()) end)
-	if not ok then
-		printe("![savesync] collecting own character failed: %s", tostring(err))
-		return
-	end
-
-	-- The engine (and xrRazom's .xrr_peers) write the files after this callback;
-	-- patch once the save is on disk.
+	-- The engine and xrRazom write the files after this callback; patch once the
+	-- save is on disk.
 	local started, tries = os.time(), 0
-	CreateTimeEvent("savesync", "own_record", 1, function()
+	CreateTimeEvent("savesync", "patch_save", 1, function()
 		tries = tries + 1
 		local name = saving_name
 		if not name then
@@ -695,11 +696,11 @@ local function on_save_state(m)
 		end
 		local base = name and saves_dir() .. name
 		if not (base and getFS():exist(base .. ".scop")) and tries < 10 then return false end
-		if base and pending_record then
-			local okp, errp = pcall(insert_own_record, base .. ".xrr_peers", pending_record, me)
-			if not okp then printe("![savesync] writing own character failed: %s", tostring(errp)) end
+		if base then
+			local ok, err = pcall(patch_save, base .. ".xrr_peers", me)
+			if not ok then printe("![savesync] updating .xrr_peers failed: %s", tostring(err)) end
 		end
-		saving_name, pending_record = nil, nil
+		saving_name = nil
 		return true
 	end)
 end
@@ -741,7 +742,7 @@ local function finish_items(pending)
 	return left
 end
 
-local function apply_items(p)
+local function apply_items(p, on_done)
 	local m = alife_storage_manager.get_state()
 	local old = {}
 	db.actor:iterate_inventory(function(_, item)
@@ -785,6 +786,7 @@ local function apply_items(p)
 		if left == 0 or tries >= 15 then
 			if left > 0 then printe("![savesync] %s items never came online", left) end
 			log("items done")
+			if on_done then on_done() end
 			return true
 		end
 		return false
@@ -842,13 +844,16 @@ local function apply_character(p)
 	end)
 end
 
-local loaded_owner
+local function load_save(name)
+	exec_console_cmd("load " .. name)
+end
 
-local function try_take_over()
+-- Take over a save someone else hosted. The save's character name is its host's
+-- xrRazom name (xrRazom renames the actor to the host's nickname on every load,
+-- a moment after this runs).
+local function try_take_over(owner)
 	local me = my_name()
-	-- Our own save (or one from before savesync stamped owners where we're absent
-	-- from .xrr_peers): nothing to do.
-	if me == "" or loaded_owner == me then return end
+	if me == "" or owner == "" or owner == me then return end
 
 	-- Which save was loaded: remembered from "load <name>", else the newest.
 	local name = read_file(app_path(LOADING_FILE))
@@ -865,26 +870,39 @@ local function try_take_over()
 		printe("![savesync] can't read %s: %s", path, tostring(err))
 		return
 	end
+	local mine
 	for _, p in ipairs(peers) do
-		if p.name == me then
-			log("'%s' saved this as host; taking over with your character from %s (%s items, money %s, rank %s)",
-				tostring(loaded_owner), name, #p.record.items, p.record.money, p.record.rank)
-			apply_character(p.record)
-			apply_items(p.record)
-			return
-		end
+		if p.name == me then mine = p.record end
 	end
-end
+	if not mine then
+		log("'%s' hosted %s and you aren't in it; playing as their character", owner, name)
+		return
+	end
 
-local function on_load_state(m)
-	loaded_owner = m.savesync_owner
+	-- Keep the old host's character as a client record before replacing it.
+	captured[owner] = encode_peer(collect_peer(owner))
+	log("taking over %s from '%s' (your character: %s items, money %s, rank %s)",
+		name, owner, #mine.items, mine.money, mine.rank)
+	apply_character(mine)
+	apply_items(mine, function()
+		-- xrRazom only reads .xrr_peers on load, so save (which writes the old
+		-- host's record into it) and load once more before anyone joins.
+		log("saving and reloading so '%s' can rejoin with their character", owner)
+		exec_console_cmd("save " .. name)
+		CreateTimeEvent("savesync", "reload", 3, function()
+			load_save(name)
+			return true
+		end)
+	end)
 end
 
 local function on_first_update()
 	if XrrIsClient and XrrIsClient() then return end
+	-- Read before xrRazom renames the actor to our nickname.
+	local owner = db.actor:character_name() or ""
 	-- Let other mods finish their own first-update work first.
 	CreateTimeEvent("savesync", "take_over", 2, function()
-		local ok, err = pcall(try_take_over)
+		local ok, err = pcall(try_take_over, owner)
 		if not ok then printe("![savesync] take over failed: %s", tostring(err)) end
 		return true
 	end)
@@ -902,7 +920,6 @@ end
 
 function on_game_start()
 	RegisterScriptCallback("save_state", on_save_state)
-	RegisterScriptCallback("load_state", on_load_state)
 	RegisterScriptCallback("actor_on_first_update", on_first_update)
 	RegisterScriptCallback("on_console_execute", on_console_execute)
 end
