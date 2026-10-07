@@ -16,7 +16,7 @@ if not exist "%PROXY%" (
     echo  savesync.dll is missing from this folder. Download the zip again.
     goto :end
 )
-tasklist /fi "imagename eq Anomaly*" 2>nul | find /i "Anomaly" >nul && (
+tasklist /fi "imagename eq Anomaly*" 2>nul | "%SystemRoot%\System32\find.exe" /i "Anomaly" >nul && (
     echo  Close the game first, then run install.bat again.
     goto :end
 )
@@ -32,6 +32,8 @@ if errorlevel 1 (
     )
 )
 copy /y "%PROXY%" "%BIN%\steam_api64.dll" >nul || goto :fail
+if not exist "%HERE%..\gamedata\scripts" mkdir "%HERE%..\gamedata\scripts"
+copy /y "%HERE%savesync.script" "%HERE%..\gamedata\scripts\savesync.script" >nul || goto :fail
 
 echo.
 echo  Installed! Start the game like normal.

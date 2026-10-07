@@ -7,7 +7,7 @@ if not exist "%BIN%\steam_api64.dll" (
     echo  Can't find your game. This folder must be inside your Anomaly folder.
     goto :end
 )
-tasklist /fi "imagename eq Anomaly*" 2>nul | find /i "Anomaly" >nul && (
+tasklist /fi "imagename eq Anomaly*" 2>nul | "%SystemRoot%\System32\find.exe" /i "Anomaly" >nul && (
     echo  Close the game first, then run uninstall.bat again.
     goto :end
 )
@@ -27,6 +27,7 @@ if errorlevel 1 (
     )
 )
 if exist "%BIN%\savesync.log" del "%BIN%\savesync.log"
+if exist "%~dp0..\gamedata\scripts\savesync.script" del "%~dp0..\gamedata\scripts\savesync.script"
 
 echo.
 echo  Uninstalled. Your saves were not touched.

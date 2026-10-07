@@ -2,11 +2,6 @@
 
     python tools/xrr_peers.py dump <file.xrr_peers>     -> JSON to stdout
     python tools/xrr_peers.py check <files...>          -> parse + re-encode, must be byte-identical
-    python tools/xrr_peers.py swap <save.xrr_peers> <savesync_host.bin> <new host name>
-        [--old-host-name NAME] [--old-host-steamid ID]
-        -> what savesync.dll will do on receive: the old host's exported character
-           becomes a client record, and the new host's own record moves to
-           savesync_apply_<id>.bin (next to the export) for the Lua side to apply.
 
 Strings are raw bytes (X-Ray uses cp1251), held as latin-1 so they round-trip.
 Lua-style tables are kept as lists of [key, value] pairs so order and types
@@ -246,58 +241,8 @@ def save(doc):
     return bytes(w.b)
 
 
-def read_export(data, magic):
-    if data[:4] != magic:
-        raise ValueError(f"not a {magic.decode()} file")
-    r = Reader(data, 8)
-    save_id = r.lstr()
-    peer = read_peer(r)
-    return save_id, peer
-
-
-def write_wrapped(magic, save_id, peer):
-    w = Writer()
-    w.b += magic
-    w.put("<I", 1)
-    w.lstr(save_id)
-    write_peer(w, peer)
-    return bytes(w.b)
-
-
-def swap(peers_path, export_path, new_host, old_name=None, old_steamid=None):
-    import os
-    import shutil
-    doc = load(open(peers_path, "rb").read())
-    save_id, old_host = read_export(open(export_path, "rb").read(), b"SSHX")
-    if old_name:
-        old_host["name"] = old_name
-    if old_steamid:
-        old_host["steamid"] = int(old_steamid)
-    times = [p["game_times"] for p in doc["peers"]]
-    if times:
-        old_host["game_times"] = max(times)
-
-    mine = [p for p in doc["peers"] if p["name"] == new_host]
-    if not mine:
-        raise SystemExit(f"no record for {new_host!r} in {peers_path}")
-    doc["peers"] = [p for p in doc["peers"] if p["name"] not in (new_host, old_host["name"])]
-    doc["peers"].append(old_host)
-
-    shutil.copyfile(peers_path, peers_path + ".orig")
-    open(peers_path, "wb").write(save(doc))
-    apply_path = os.path.join(os.path.dirname(os.path.abspath(export_path)), f"savesync_apply_{save_id}.bin")
-    open(apply_path, "wb").write(write_wrapped(b"SSAP", save_id, mine[0]))
-    print(f"{peers_path}: removed {new_host}, added {old_host['name']} as a client "
-          f"({len(old_host['items'])} items); peers now: {', '.join(p['name'] for p in doc['peers'])}")
-    print(f"wrote {apply_path} ({len(mine[0]['items'])} items, money {mine[0]['money']}, rank {mine[0]['rank']})")
-
-
 def main():
     cmd, files = sys.argv[1], sys.argv[2:]
-    if cmd == "swap":
-        opts = dict(zip(files[3::2], files[4::2]))
-        swap(files[0], files[1], files[2], opts.get("--old-host-name"), opts.get("--old-host-steamid"))
-        return
     if cmd == "dump":
         print(json.dumps(load(open(files[0], "rb").read()), indent=1))
     elif cmd == "check":

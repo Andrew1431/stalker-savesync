@@ -1,20 +1,18 @@
 --[[
-  stalker-savesync: host character export.
+  stalker-savesync: lets anyone in the group host a co-op save.
 
-  xrRazom keeps every client's character in <save>.xrr_peers, but the host's own
-  character only exists inside the .scop. To let someone else host a save later,
-  the host's character is written out on every save in the same record format
-  xrRazom uses for clients (.xrr_peers v15, see docs/xrr_peers-format.md).
+  xrRazom keeps every client's character in <save>.xrr_peers (keyed by player
+  name), but the host's own character only exists inside the .scop. So:
 
-  On save_state the host writes appdata/savesync_host.bin:
-      "SSHX" u32 format, lstr save id, peer record
-  and stamps the same id into m_data.savesync_id, so a loaded save can be
-  matched back to its export. savesync.dll attaches the file to the save it
-  ships to other players.
+  - On every save, the host also writes their own character into that save's
+    .xrr_peers (same record format xrRazom uses, see docs/xrr_peers-format.md)
+    and stamps m_data.savesync_owner = their name.
+  - On load, if the save belongs to someone else and our name is in its
+    .xrr_peers, we were a client in it: that record is applied to the actor,
+    turning the inherited character into ours. The old host's character is
+    already in .xrr_peers for when they join.
 ]]
 
-local EXPORT_FORMAT = 1
-local EXPORT_FILE = "savesync_host.bin"
 local MAX_DEPTH = 8  -- same table depth limit xrRazom's codecs use
 
 -- Slots as numbered in xrRazom's records.
@@ -558,55 +556,18 @@ function collect_peer()
 	}
 end
 
------------------------------------------------------------------- export on save
+------------------------------------------------------------------ save file plumbing
 
-local function new_save_id()
-	return string.format("%d-%d", os.time(), math.random(1, 1e9))
+local PEERS_VERSION = 15
+local LOADING_FILE = "savesync_loading.txt"
+
+local function my_name()
+	return get_console_cmd(0, "xrr_player_name") or ""
 end
 
-local function export_path()
-	return getFS():update_path("$app_data_root$", "") .. EXPORT_FILE
+local function saves_dir()
+	return getFS():update_path("$game_saves$", "")
 end
-
-local exporting = false
-
-local function on_save_state(m)
-	-- Clients never write saves, and collect_peer re-fires save_state itself.
-	if exporting or not db.actor then return end
-	if XrrIsClient and XrrIsClient() then return end
-
-	exporting = true
-	local ok, err = pcall(function()
-		local id = new_save_id()
-		local record = encode_peer(collect_peer())
-		local w = W.new()
-		w:raw("SSHX")
-		w:u32(EXPORT_FORMAT)
-		w:lstr(id)
-		w:raw(record)
-		local f = io.open(export_path(), "wb")
-		if not f then error("can't open " .. export_path()) end
-		f:write(w:bytes())
-		f:close()
-		m.savesync_id = id
-		printf("[savesync] exported host character (%s bytes, id %s)", #record, id)
-	end)
-	exporting = false
-	if not ok then printe("![savesync] host export failed: %s", tostring(err)) end
-end
-
------------------------------------------------------------------- apply on load (new host)
-
---[[
-  When someone hosts a save they received, savesync.dll moves their own client
-  record out of <save>.xrr_peers into appdata/savesync_apply_<save id>.bin
-  ("SSAP" u32 format, lstr save id, peer record). On load we find it through
-  m_data.savesync_id and turn the inherited host character into theirs.
-  Position is not applied: the new host stays where the old host saved.
-]]
-
-local APPLY_PREFIX = "savesync_apply_"
-local loaded_id
 
 local function app_path(name)
 	return getFS():update_path("$app_data_root$", "") .. name
@@ -620,9 +581,132 @@ local function read_file(path)
 	return s
 end
 
+local function write_file(path, data)
+	local f = io.open(path, "wb")
+	if not f then return false end
+	f:write(data)
+	f:close()
+	return true
+end
+
 local function log(fmt, ...)
 	printf("[savesync] " .. fmt, ...)
 end
+
+-- Newest save (by .scop time) as { name, modif }.
+local function newest_save()
+	local list = getFS():file_list_open_ex("$game_saves$", bit_or(FS.FS_ListFiles, FS.FS_RootOnly), "*.scop")
+	local best
+	for i = 0, list:Size() - 1 do
+		local f = list:GetAt(i)
+		if not best or f:Modif() > best.modif then
+			best = { name = (f:NameFull():gsub("%.scop$", "")), modif = f:Modif() }
+		end
+	end
+	return best
+end
+
+-- .xrr_peers -> list of { name, raw, record }; nil + error if it isn't a v15 file.
+-- A missing file is an empty list.
+function read_peers_string(s)
+	if not s then return {} end
+	if s:sub(1, 4) ~= "XPRR" then return nil, "not an .xrr_peers file" end
+	local r = R.new(s, 5)
+	local version, count = r:u32(), r:u32()
+	if version ~= PEERS_VERSION then return nil, "unsupported .xrr_peers version " .. version end
+	local out, pos = {}, r.p
+	for i = 1, count do
+		local p, next_pos = decode_peer(s, pos)
+		out[i] = { name = p.name, raw = s:sub(pos, next_pos - 1), record = p }
+		pos = next_pos
+	end
+	return out
+end
+
+function peers_bytes(peers)
+	local w = W.new()
+	w:raw("XPRR")
+	w:u32(PEERS_VERSION)
+	w:u32(#peers)
+	for _, p in ipairs(peers) do w:raw(p.raw) end
+	return w:bytes()
+end
+
+------------------------------------------------------------------ on save: write our own record
+
+local saving_name    -- from the "save <name>" console command, if we saw it
+local pending_record -- our character, collected when save_state fired
+
+-- Returns the peers file bytes with our record replacing any old one. SteamID and
+-- game times can't round-trip a Lua number, so they're copied as raw bytes from
+-- records already in the file.
+function with_own_record(s, record, me)
+	local peers, err = read_peers_string(s)
+	if not peers then return nil, err end
+	local name_len = #me + 1
+	local steamid = string.rep("\0", 8)
+	local times
+	local out = {}
+	for _, p in ipairs(peers) do
+		if p.name == me then
+			steamid = p.raw:sub(name_len + 1, name_len + 8)
+		else
+			times = times or p.raw:sub(-16)
+			out[#out + 1] = p
+		end
+	end
+	local raw = record:sub(1, name_len) .. steamid .. record:sub(name_len + 9)
+	if times then raw = raw:sub(1, -17) .. times end
+	out[#out + 1] = { name = me, raw = raw }
+	return peers_bytes(out), #out
+end
+
+local function insert_own_record(path, record, me)
+	local data, n = with_own_record(read_file(path), record, me)
+	if not data then
+		printe("![savesync] not touching %s: %s", path, tostring(n))
+		return
+	end
+	if write_file(path, data) then log("wrote own character into %s (%s players)", path, n) end
+end
+
+local function on_save_state(m)
+	if not db.actor then return end
+	if XrrIsClient and XrrIsClient() then return end
+	local me = my_name()
+	if me == "" then return end
+
+	m.savesync_owner = me
+	local ok, err = pcall(function() pending_record = encode_peer(collect_peer()) end)
+	if not ok then
+		printe("![savesync] collecting own character failed: %s", tostring(err))
+		return
+	end
+
+	-- The engine (and xrRazom's .xrr_peers) write the files after this callback;
+	-- patch once the save is on disk.
+	local started, tries = os.time(), 0
+	CreateTimeEvent("savesync", "own_record", 1, function()
+		tries = tries + 1
+		local name = saving_name
+		if not name then
+			local newest = newest_save()
+			if newest and newest.modif >= started - 2 then name = newest.name end
+		end
+		local base = name and saves_dir() .. name
+		if not (base and getFS():exist(base .. ".scop")) and tries < 10 then return false end
+		if base and pending_record then
+			local okp, errp = pcall(insert_own_record, base .. ".xrr_peers", pending_record, me)
+			if not okp then printe("![savesync] writing own character failed: %s", tostring(errp)) end
+		end
+		saving_name, pending_record = nil, nil
+		return true
+	end)
+end
+
+------------------------------------------------------------------ on load: take over the character
+
+-- Position is not applied: the new host stays where the old host saved.
 
 local function step(name, fn)
 	local ok, err = pcall(fn)
@@ -693,7 +777,7 @@ local function apply_items(p)
 	end
 	log("spawned %s of %s items", spawned, #p.items)
 
-	-- Upgrades, magazines and slots need the items online.
+	-- Upgrades, condition, magazines and slots need the items online.
 	local tries = 0
 	CreateTimeEvent("savesync", "finish_items", 1, function()
 		tries = tries + 1
@@ -758,55 +842,67 @@ local function apply_character(p)
 	end)
 end
 
-local function try_apply()
-	if not loaded_id then return end
-	local path = app_path(APPLY_PREFIX .. loaded_id .. ".bin")
-	local s = read_file(path)
-	if not s then return end
-	if s:sub(1, 4) == "DONE" then return end
-	if s:sub(1, 4) ~= "SSAP" then
-		printe("![savesync] %s is not an apply file", path)
+local loaded_owner
+
+local function try_take_over()
+	local me = my_name()
+	-- Our own save (or one from before savesync stamped owners where we're absent
+	-- from .xrr_peers): nothing to do.
+	if me == "" or loaded_owner == me then return end
+
+	-- Which save was loaded: remembered from "load <name>", else the newest.
+	local name = read_file(app_path(LOADING_FILE))
+	write_file(app_path(LOADING_FILE), "")
+	if not name or name == "" then
+		local newest = newest_save()
+		name = newest and newest.name
+	end
+	if not name then return end
+
+	local path = saves_dir() .. name .. ".xrr_peers"
+	local peers, err = read_peers_string(read_file(path))
+	if not peers then
+		printe("![savesync] can't read %s: %s", path, tostring(err))
 		return
 	end
-	local r = R.new(s, 5)
-	r:u32()  -- format
-	r:lstr() -- save id
-	local p = decode_peer(s, r.p)
-
-	local me = get_console_cmd(0, "xrr_player_name") or ""
-	if p.name ~= me then
-		log("apply file is for '%s', not '%s'; skipping", p.name, me)
-		return
+	for _, p in ipairs(peers) do
+		if p.name == me then
+			log("'%s' saved this as host; taking over with your character from %s (%s items, money %s, rank %s)",
+				tostring(loaded_owner), name, #p.record.items, p.record.money, p.record.rank)
+			apply_character(p.record)
+			apply_items(p.record)
+			return
+		end
 	end
-
-	-- Apply only once, and mark it first so a failure part-way can't re-run the item
-	-- swap on reload. Anomaly's Lua has no os.rename/os.remove, so overwrite the file.
-	local f = io.open(path, "wb")
-	if f then
-		f:write("DONE")
-		f:close()
-	end
-	log("taking over this save as '%s' (%s items, money %s, rank %s)", p.name, #p.items, p.money, p.rank)
-	apply_character(p)
-	apply_items(p)
 end
 
 local function on_load_state(m)
-	loaded_id = m.savesync_id
+	loaded_owner = m.savesync_owner
 end
 
 local function on_first_update()
 	if XrrIsClient and XrrIsClient() then return end
 	-- Let other mods finish their own first-update work first.
-	CreateTimeEvent("savesync", "apply", 2, function()
-		local ok, err = pcall(try_apply)
-		if not ok then printe("![savesync] apply failed: %s", tostring(err)) end
+	CreateTimeEvent("savesync", "take_over", 2, function()
+		local ok, err = pcall(try_take_over)
+		if not ok then printe("![savesync] take over failed: %s", tostring(err)) end
 		return true
 	end)
+end
+
+local function on_console_execute(name, ...)
+	local arg = table.concat({ ... }, " ")
+	if name == "save" and arg ~= "" then
+		saving_name = arg
+	elseif name == "load" and arg ~= "" then
+		-- Lua restarts on load, so remember the name on disk.
+		write_file(app_path(LOADING_FILE), arg)
+	end
 end
 
 function on_game_start()
 	RegisterScriptCallback("save_state", on_save_state)
 	RegisterScriptCallback("load_state", on_load_state)
 	RegisterScriptCallback("actor_on_first_update", on_first_update)
+	RegisterScriptCallback("on_console_execute", on_console_execute)
 end
