@@ -32,14 +32,16 @@ The update turns savesync off. Just double-click `install.bat` again.
 
 Close the game and double-click `uninstall.bat`. Your saves are not touched.
 
-## Manual install (if install.bat doesn't work)
+## Manual install (if install.bat doesn't work, or on Linux)
 
-In `Anomaly\bin`:
+1. In `Anomalyin`, rename `steam_api64.dll` to `steam_api64_real.dll`.
+   (Skip this if `steam_api64_real.dll` is already there: you're updating.)
+2. Copy `savesync.dll` from the zip into `Anomalyin` and rename it to `steam_api64.dll`.
+3. Copy `savesync.script` from the zip into `Anomaly\gamedata\scripts`
+   (create the `scripts` folder if it doesn't exist).
 
-1. Rename `steam_api64.dll` to `steam_api64_real.dll`.
-2. Copy `savesync.dll` from the zip into `bin` and rename it to `steam_api64.dll`.
-
-To undo: delete `steam_api64.dll`, rename `steam_api64_real.dll` back to `steam_api64.dll`.
+To undo: delete `bin\steam_api64.dll`, rename `steam_api64_real.dll` back to
+`steam_api64.dll`, and delete `gamedata\scripts\savesync.script`.
 
 ## Problems?
 
