@@ -1,4 +1,4 @@
-# savesync test script (v1.4.0)
+# savesync test script (v1.4.1)
 
 Two people (A and B) can run everything except test 9. A third person (C)
 covers a player who never hosts, and a Linux/Proton player covers test 10.
@@ -6,8 +6,8 @@ covers a player who never hosts, and a Linux/Proton player covers test 10.
 ## Before you start (everyone)
 
 1. Close the game. Copy your whole `Anomaly\appdata\savedgames` folder somewhere safe.
-2. Install v1.4.0 (`install.bat`, or manual install from the README).
-3. Start the game, then close it. `Anomaly\bin\savesync.log` should say `savesync 1.4.0 ready`.
+2. Install v1.4.1 (`install.bat`, or manual install from the README).
+3. Start the game, then close it. `Anomaly\bin\savesync.log` should say `savesync 1.4.1 ready`.
 
 ## Make your characters easy to recognise
 
@@ -45,14 +45,19 @@ Write down the save name, who hosted, and the result (pass / fail / weird).
 - The other player gets the save.
 - Take it over like test 2. It should work the same.
 
+**5b. Save from plain xrRazom.** Someone without savesync (or with it uninstalled) hosts and saves, and sends you the save files by hand.
+- Put them in your `savedgames` folder and load: same result as test 8.
+
 **6. Join quickly.** B loads a `sync-A` save, and A joins straight away, during B's loading screen if possible.
 - A still gets A's own character.
 
 **7. Save right after loading in.** B loads a `sync-A` save and saves within 2 seconds of pressing a key.
 - Check nothing is duplicated or missing, either right away or after reloading that save.
 
-**8. Old save.** Load a save made before v1.4.0 that someone else hosted.
-- You play as the old host's character. That's expected.
+**8. Old save.** Load a save someone else hosted before anyone had v1.4.1, one you were in as a client.
+- You become your own character, then the game saves and reloads by itself once.
+- The old host joins and gets their own character.
+- Load the same save again: no second reload this time.
 
 **9. Third player (needs C).** A hosts and A, B and C play; save. B takes over and A and C join.
 - C's character is untouched the whole time.

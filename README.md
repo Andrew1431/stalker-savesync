@@ -24,8 +24,8 @@ Done. Play like normal.
 - Joining a game also gives you the host's latest save.
 - To take over hosting: load the newest `sync-...` save and host. You play your
   own character; the old host gets theirs back when they join.
-- Only saves made with savesync installed can be taken over. Older saves load
-  as the old host's character.
+- Older saves (made before you had savesync) work too, as long as you were in
+  them. The first time, the game saves and reloads once by itself.
 
 ## After an xrRazom update
 
