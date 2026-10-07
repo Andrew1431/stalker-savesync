@@ -3,6 +3,7 @@
     python tools/xrr_peers.py dump <file.xrr_peers>     -> JSON to stdout
     python tools/xrr_peers.py check <files...>          -> parse + re-encode, must be byte-identical
 
+Strings are raw bytes (X-Ray uses cp1251), held as latin-1 so they round-trip.
 Lua-style tables are kept as lists of [key, value] pairs so order and types
 survive a round trip. Floats are written back from the exact parsed values.
 """
@@ -26,13 +27,13 @@ class Reader:
 
     def cstr(self):
         e = self.d.index(b"\0", self.p)
-        s = self.d[self.p:e].decode("utf-8")
+        s = self.d[self.p:e].decode("latin-1")
         self.p = e + 1
         return s
 
     def lstr(self):
         n = self.take("<H")
-        s = self.d[self.p:self.p + n].decode("utf-8")
+        s = self.d[self.p:self.p + n].decode("latin-1")
         self.p += n
         return s
 
@@ -57,10 +58,10 @@ class Writer:
         self.b += struct.pack(fmt, *v)
 
     def cstr(self, s):
-        self.b += s.encode("utf-8") + b"\0"
+        self.b += s.encode("latin-1") + b"\0"
 
     def lstr(self, s):
-        e = s.encode("utf-8")
+        e = s.encode("latin-1")
         self.put("<H", len(e))
         self.b += e
 
@@ -112,8 +113,8 @@ def read_item(r):
         "slot": r.take("<B"),    # slot index when place == 1
         "place": r.take("<B"),   # X-Ray eItemPlace: 1 slot, 2 belt, 3 backpack
         "uses": r.take("<B"),
-        "unk_u8b": r.take("<B"),
     }
+    it["upgrades"] = [r.cstr() for _ in range(r.take("<B"))]
     if r.take("<B"):
         n = r.take("<H")
         end = r.p + n
@@ -127,7 +128,9 @@ def write_item(w, it):
     w.put("<I", it["id"])
     w.cstr(it["section"])
     w.put("<HfIBBBB", it["count"], it["condition"], it["ammo_in_mag"], it["slot"], it["place"],
-          it["uses"], it["unk_u8b"])
+          it["uses"], len(it["upgrades"]))
+    for u in it["upgrades"]:
+        w.cstr(u)
     if "data" in it:
         inner = Writer()
         inner.put("<H", len(it["data"]))

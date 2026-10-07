@@ -21,7 +21,7 @@ encode_peer = lua.globals()[b"encode_peer"]
 
 def to_lua(v):
     if isinstance(v, str):
-        return v.encode("utf-8")
+        return v.encode("latin-1")
     if isinstance(v, dict):
         return lua.table_from({k.encode(): to_lua(x) for k, x in v.items()})
     if isinstance(v, (list, tuple)):

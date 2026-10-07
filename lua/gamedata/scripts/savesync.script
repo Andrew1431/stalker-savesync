@@ -18,7 +18,7 @@ local EXPORT_FILE = "savesync_host.bin"
 local MAX_DEPTH = 8  -- same table depth limit xrRazom's codecs use
 
 -- Slots as numbered in xrRazom's records.
-local SLOT_OUTFIT, SLOT_PDA, SLOT_TORCH, SLOT_HELMET = 7, 8, 10, 12
+local SLOT_OUTFIT, SLOT_PDA, SLOT_HELMET = 7, 8, 12
 local PLACE_SLOT, PLACE_BELT, PLACE_RUCK = 1, 2, 3
 local LIMBS = { "head", "leftarm", "leftleg", "rightarm", "rightleg", "torso" }
 
@@ -154,7 +154,8 @@ function encode_peer(p)
 		w:u8(it.slot)
 		w:u8(it.place)
 		w:u8(it.uses)
-		w:u8(it.unk_u8b)
+		w:u8(#it.upgrades)
+		for _, u in ipairs(it.upgrades) do w:cstr(u) end
 		if it.data then
 			local inner = W.new()
 			inner:u16(#it.data)
@@ -248,8 +249,12 @@ local function collect_item(item, slots, mdata_keys, m)
 	local count = 1
 	if IsAmmo(item) then count = item:ammo_get_count() end
 
+	-- xrRazom packs rounds in the low 16 bits and the loaded ammo type above them.
 	local mag = 0
-	if IsWeapon(item) and item.get_ammo_in_magazine then mag = item:get_ammo_in_magazine() or 0 end
+	if IsWeapon(item) and not IsMelee(item) and item.get_ammo_in_magazine then
+		mag = (item:get_ammo_in_magazine() or 0) % 65536
+		if item.get_ammo_type then mag = mag + (item:get_ammo_type() or 0) * 65536 end
+	end
 
 	local uses = 0
 	if item.get_remaining_uses then
@@ -271,9 +276,14 @@ local function collect_item(item, slots, mdata_keys, m)
 	if type(parts) == "table" then data[#data + 1] = { "parts", to_typed(parts, MAX_DEPTH) } end
 	data[#data + 1] = { "m_data", { table = riders } }
 
+	local upgrades = {}
+	if item.iterate_installed_upgrades then
+		item:iterate_installed_upgrades(function(u) upgrades[#upgrades + 1] = u end)
+	end
+
 	return {
 		id = id, section = item:section(), count = count, condition = item:condition(),
-		ammo_in_mag = mag, slot = slot, place = place, uses = uses, unk_u8b = 0,
+		ammo_in_mag = mag, slot = slot, place = place, uses = uses, upgrades = upgrades,
 		data = data, unk_tail = 0,
 	}
 end
@@ -294,7 +304,10 @@ function collect_peer()
 	end
 	local items = {}
 	actor:iterate_inventory(function(_, item)
-		items[#items + 1] = collect_item(item, slots, item_keys, m)
+		-- GAMMA's slot-10 dummy torch isn't a real item; xrRazom leaves it out.
+		if item:section() ~= "device_torch_dummy" then
+			items[#items + 1] = collect_item(item, slots, item_keys, m)
+		end
 	end, actor)
 
 	local goodwill = {}
@@ -328,7 +341,11 @@ function collect_peer()
 			local tv = v ~= nil and to_typed(v, MAX_DEPTH) or nil
 			if tv ~= nil then mdata[#mdata + 1] = { key, tv } end
 		end
+		table.sort(mdata, function(a, b) return a[1] < b[1] end)
 	end
+
+	local visual = actor:get_visual_name() or ""
+	if visual ~= "" and not visual:find("%.ogf$") then visual = visual .. ".ogf" end
 
 	local active = actor:active_item()
 	local pos = actor:position()
@@ -338,11 +355,11 @@ function collect_peer()
 		name = get_console_cmd(0, "xrr_player_name") or "",
 		steamid = 0,  -- filled in by savesync.dll
 		faction = get_actor_true_community(),
-		visual = actor:get_visual_name() or "",
+		visual = visual,
 		outfit = section_in_slot(SLOT_OUTFIT),
 		helmet = section_in_slot(SLOT_HELMET),
 		pda = section_in_slot(SLOT_PDA),
-		torch = section_in_slot(SLOT_TORCH),
+		torch = actor:object("device_torch") and "device_torch" or "",
 		active_weapon = active and active:section() or "",
 		active_slot = actor:active_slot(),
 		level = level.name(),
@@ -352,8 +369,8 @@ function collect_peer()
 		unk_u32 = 0,
 		money = actor:money(),
 		quick_slots = {
-			get_console_cmd(1, "slot_0") or "", get_console_cmd(1, "slot_1") or "",
-			get_console_cmd(1, "slot_2") or "", get_console_cmd(1, "slot_3") or "",
+			get_console_cmd(0, "slot_0") or "", get_console_cmd(0, "slot_1") or "",
+			get_console_cmd(0, "slot_2") or "", get_console_cmd(0, "slot_3") or "",
 		},
 		unk_u8 = 1,
 		items = items,
@@ -402,7 +419,7 @@ local function on_save_state(m)
 		f:write(w:bytes())
 		f:close()
 		m.savesync_id = id
-		printf("[savesync] exported host character (%d bytes, id %s)", #record, id)
+		printf("[savesync] exported host character (%s bytes, id %s)", #record, id)
 	end)
 	exporting = false
 	if not ok then printe("![savesync] host export failed: %s", tostring(err)) end

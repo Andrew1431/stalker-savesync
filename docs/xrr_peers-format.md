@@ -63,7 +63,7 @@ Little-endian. `cstr` = NUL-terminated, `lstr` = u16 length + bytes.
 | u8   | slot index (when place = 1) |
 | u8   | place: 1 slot, 2 belt, 3 backpack |
 | u8   | uses left |
-| u8   | ? always 0 |
+| u8 + cstr[] | installed upgrades |
 | u8   | has data; if 1: u16 byte length, u16 count, (lstr key, typed value)[] |
 | u16  | ? always 0 |
 
