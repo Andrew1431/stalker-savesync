@@ -1,6 +1,6 @@
 # stalker-savesync
 
-> **⚠️ Not working yet — don't use it.** Taking over hosting from a synced save currently loses the original host's character. Being fixed.
+> **⚠️ Testing.** Back up your saves folder (`Anomaly\appdata\savedgames`) before using it.
 
 When the host saves, everyone in the co-op game gets a copy of that save.
 Anyone can then load it and host next time.
@@ -22,7 +22,10 @@ Done. Play like normal.
 - When the host saves, the save shows up for everyone a few seconds later.
 - In the Load menu it's called `sync-<host name> - <save name>`.
 - Joining a game also gives you the host's latest save.
-- To take over hosting: load the newest `sync-...` save and host.
+- To take over hosting: load the newest `sync-...` save and host. You play your
+  own character; the old host gets theirs back when they join.
+- Only saves made with savesync installed can be taken over. Older saves load
+  as the old host's character.
 
 ## After an xrRazom update
 
