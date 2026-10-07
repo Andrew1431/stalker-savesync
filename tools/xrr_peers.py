@@ -2,6 +2,7 @@
 
     python tools/xrr_peers.py dump <file.xrr_peers>     -> JSON to stdout
     python tools/xrr_peers.py check <files...>          -> parse + re-encode, must be byte-identical
+    python tools/xrr_peers.py remove <file> <name>      -> drop one player's record (keeps <file>.bak)
 
 Strings are raw bytes (X-Ray uses cp1251), held as latin-1 so they round-trip.
 Lua-style tables are kept as lists of [key, value] pairs so order and types
@@ -259,6 +260,19 @@ def main():
                 print(f"FAIL {e}: {f}")
                 bad += 1
         sys.exit(1 if bad else 0)
+    elif cmd == "remove":
+        path, name = files
+        data = open(path, "rb").read()
+        doc = load(data)
+        if save(doc) != data:
+            sys.exit(f"{path} doesn't round-trip exactly; not touching it")
+        names = [p["name"] for p in doc["peers"]]
+        if name not in names:
+            sys.exit(f"'{name}' isn't in {path} (players: {', '.join(names)})")
+        open(path + ".bak", "wb").write(data)
+        doc["peers"] = [p for p in doc["peers"] if p["name"] != name]
+        open(path, "wb").write(save(doc))
+        print(f"removed '{name}' from {path} (backup: {path}.bak)")
 
 
 if __name__ == "__main__":
