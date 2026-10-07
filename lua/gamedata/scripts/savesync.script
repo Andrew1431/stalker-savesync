@@ -192,6 +192,173 @@ function encode_peer(p)
 	return w:bytes()
 end
 
+------------------------------------------------------------------ record decoder
+
+local byte, ldexp = string.byte, math.ldexp
+
+local R = {}
+R.__index = R
+
+function R.new(s, pos) return setmetatable({ s = s, p = pos or 1 }, R) end
+
+function R:uint(n)
+	local v, mul = 0, 1
+	for i = 0, n - 1 do
+		v = v + byte(self.s, self.p + i) * mul
+		mul = mul * 256
+	end
+	self.p = self.p + n
+	return v
+end
+
+function R:u8()  return self:uint(1) end
+function R:u16() return self:uint(2) end
+function R:u32() return self:uint(4) end
+function R:i32() local v = self:uint(4) return v >= 2147483648 and v - 4294967296 or v end
+function R:u64() return self:uint(8) end  -- lossy above 2^53; only used for ids we don't need
+
+local function unpack_float(lo, hi, bits)
+	local ebits, mbits = bits == 32 and 8 or 11, bits == 32 and 23 or 52
+	local bias = 2 ^ (ebits - 1) - 1
+	local word = bits == 32 and lo or hi
+	local sign = word >= 2 ^ 31 and -1 or 1
+	local top = word % 2 ^ 31
+	local e, m
+	if bits == 32 then
+		e, m = floor(top / 2 ^ 23), top % 2 ^ 23
+	else
+		e, m = floor(top / 2 ^ 20), (top % 2 ^ 20) * 2 ^ 32 + lo
+	end
+	if e == 0 then
+		if m == 0 then return sign * 0.0 end
+		return sign * ldexp(m, 1 - bias - mbits)
+	end
+	if e == 2 ^ ebits - 1 then
+		if m == 0 then return sign * math.huge end
+		return 0 / 0
+	end
+	return sign * ldexp(1 + m / 2 ^ mbits, e - bias)
+end
+
+function R:f32() return unpack_float(self:u32(), 0, 32) end
+function R:f64() local lo = self:u32() return unpack_float(lo, self:u32(), 64) end
+
+function R:cstr()
+	local e = self.s:find("\0", self.p, true)
+	local v = self.s:sub(self.p, e - 1)
+	self.p = e + 1
+	return v
+end
+
+function R:lstr()
+	local n = self:u16()
+	local v = self.s:sub(self.p, self.p + n - 1)
+	self.p = self.p + n
+	return v
+end
+
+function R:value()
+	local t = self:u8()
+	if t == 1 then return self:u8() ~= 0 end
+	if t == 2 then return self:f64() end
+	if t == 3 then return self:lstr() end
+	if t == 4 then
+		local out = {}
+		for i = 1, self:u16() do
+			local k = self:value()
+			out[i] = { k, self:value() }
+		end
+		return { table = out }
+	end
+	error("unknown value type " .. t)
+end
+
+function R:sized()
+	local key = self:cstr()
+	local n = self:u16()
+	local start = self.p
+	local v = self:value()
+	assert(self.p == start + n, "sized value length mismatch for " .. key)
+	return { key, v }
+end
+
+-- Inverse of encode_peer; returns the record and the position after it.
+function decode_peer(s, pos)
+	local r = R.new(s, pos)
+	local p = {}
+	p.name = r:cstr()
+	p.steamid = r:u64()
+	p.faction = r:cstr()
+	p.visual = r:cstr()
+	p.outfit = r:cstr()
+	p.helmet = r:cstr()
+	p.pda = r:cstr()
+	p.torch = r:cstr()
+	p.active_weapon = r:cstr()
+	p.active_slot = r:u32()
+	p.level = r:cstr()
+	p.position = { r:f32(), r:f32(), r:f32() }
+	p.unk_angles = { r:f32(), r:f32() }
+	p.health = r:f32()
+	p.unk_u32 = r:u32()
+	p.money = r:u32()
+	p.quick_slots = { r:cstr(), r:cstr(), r:cstr(), r:cstr() }
+	p.unk_u8 = r:u8()
+
+	p.items = {}
+	for i = 1, r:u16() do
+		local it = {}
+		it.id = r:u32()
+		it.section = r:cstr()
+		it.count = r:u16()
+		it.condition = r:f32()
+		it.ammo_in_mag = r:u32()
+		it.slot = r:u8()
+		it.place = r:u8()
+		it.uses = r:u8()
+		it.upgrades = {}
+		for j = 1, r:u8() do it.upgrades[j] = r:cstr() end
+		if r:u8() ~= 0 then
+			local n = r:u16()
+			local start = r.p
+			it.data = {}
+			for j = 1, r:u16() do
+				local k = r:lstr()
+				it.data[j] = { k, r:value() }
+			end
+			assert(r.p == start + n, "item data length mismatch for " .. it.section)
+		end
+		it.unk_tail = r:u16()
+		p.items[i] = it
+	end
+
+	p.reputation = r:i32()
+	p.rank = r:i32()
+	p.faction_goodwill = {}
+	for i = 1, r:u16() do p.faction_goodwill[i] = { r:u8(), r:i32() } end
+	p.npc_relations = {}
+	for i = 1, r:u16() do p.npc_relations[i] = { r:u16(), r:i32() } end
+	p.stats = r:cstr()
+	p.needs = r:cstr()
+	p.unk_u8_flags = r:u8()
+	p.flags = {}
+	for i = 1, r:u16() do p.flags[i] = { r:cstr(), r:cstr() } end
+	p.limbs = {}
+	for i = 1, r:u16() do p.limbs[i] = r:sized() end
+	p.m_data = {}
+	for i = 1, r:u16() do p.m_data[i] = r:sized() end
+	p.game_times = { r:u64(), r:u64() }
+	return p, r.p
+end
+
+-- Typed form -> native Lua value.
+function to_native(v)
+	if type(v) ~= "table" then return v end
+	local out = {}
+	for _, kv in ipairs(v.table) do out[to_native(kv[1])] = to_native(kv[2]) end
+	return out
+end
+
 ------------------------------------------------------------------ collecting the live actor
 
 -- Native Lua value -> typed form; nil for anything the format can't hold.
@@ -425,6 +592,195 @@ local function on_save_state(m)
 	if not ok then printe("![savesync] host export failed: %s", tostring(err)) end
 end
 
+------------------------------------------------------------------ apply on load (new host)
+
+--[[
+  When someone hosts a save they received, savesync.dll moves their own client
+  record out of <save>.xrr_peers into appdata/savesync_apply_<save id>.bin
+  ("SSAP" u32 format, lstr save id, peer record). On load we find it through
+  m_data.savesync_id and turn the inherited host character into theirs.
+  Position is not applied: the new host stays where the old host saved.
+]]
+
+local APPLY_PREFIX = "savesync_apply_"
+local loaded_id
+
+local function app_path(name)
+	return getFS():update_path("$app_data_root$", "") .. name
+end
+
+local function read_file(path)
+	local f = io.open(path, "rb")
+	if not f then return nil end
+	local s = f:read("*a")
+	f:close()
+	return s
+end
+
+local function log(fmt, ...)
+	printf("[savesync] " .. fmt, ...)
+end
+
+local function step(name, fn)
+	local ok, err = pcall(fn)
+	if not ok then printe("![savesync] apply step '%s' failed: %s", name, tostring(err)) end
+	return ok
+end
+
+local function finish_items(pending)
+	local left = 0
+	for id, it in pairs(pending) do
+		local obj = level.object_by_id(id)
+		if obj then
+			step("item " .. it.section, function()
+				for _, u in ipairs(it.upgrades) do obj:install_upgrade(u) end
+				if it.ammo_in_mag > 0 and IsWeapon(obj) then
+					obj:set_ammo_type(floor(it.ammo_in_mag / 65536))
+					obj:set_ammo_elapsed(it.ammo_in_mag % 65536)
+				end
+				if it.place == PLACE_SLOT and it.slot > 0 then
+					db.actor:move_to_slot(obj, it.slot)
+				elseif it.place == PLACE_BELT then
+					db.actor:move_to_belt(obj)
+				end
+			end)
+			pending[id] = nil
+		else
+			left = left + 1
+		end
+	end
+	return left
+end
+
+local function apply_items(p)
+	local m = alife_storage_manager.get_state()
+	local old = {}
+	db.actor:iterate_inventory(function(_, item)
+		if item:section() ~= "device_torch_dummy" then old[#old + 1] = item:id() end
+	end, db.actor)
+	for _, id in ipairs(old) do alife_release_id(id) end
+	log("removed %s inherited items", #old)
+
+	local pending, spawned = {}, 0
+	for _, it in ipairs(p.items) do
+		step("spawn " .. it.section, function()
+			local t = { cond = it.condition }
+			if it.uses > 0 then t.uses = it.uses end
+			if it.section:find("^ammo_") then t.ammo = it.count end
+			local se = alife_create_item(it.section, db.actor, t)
+			if not se then error("alife_create_item returned nil") end
+			spawned = spawned + 1
+			for _, kv in ipairs(it.data or {}) do
+				if kv[1] == "parts" then
+					se_save_var(se.id, se:name(), "parts", to_native(kv[2]))
+				elseif kv[1] == "m_data" then
+					for _, rider in ipairs(kv[2].table) do
+						local key = rider[1]
+						m[key] = m[key] or {}
+						m[key][se.id] = to_native(rider[2])
+					end
+				end
+			end
+			pending[se.id] = it
+		end)
+	end
+	log("spawned %s of %s items", spawned, #p.items)
+
+	-- Upgrades, magazines and slots need the items online.
+	local tries = 0
+	CreateTimeEvent("savesync", "finish_items", 1, function()
+		tries = tries + 1
+		local left = finish_items(pending)
+		if left == 0 or tries >= 15 then
+			if left > 0 then printe("![savesync] %s items never came online", left) end
+			log("items done")
+			return true
+		end
+		return false
+	end)
+end
+
+local function apply_character(p)
+	local actor = db.actor
+	step("money", function() actor:give_money(p.money - actor:money()) end)
+	step("rank", function() actor:set_character_rank(p.rank) end)
+	step("reputation", function() actor:set_character_reputation(p.reputation) end)
+	step("faction", function()
+		if p.faction ~= "" and p.faction ~= get_actor_true_community() then
+			actor:set_character_community("actor_" .. p.faction, 0, 0)
+		end
+	end)
+	step("goodwill", function()
+		local by_index = {}
+		for _, g in ipairs(p.faction_goodwill) do by_index[g[1]] = g[2] end
+		for comm, i in pairs(community_indices()) do
+			relation_registry.set_community_goodwill(comm, actor:id(), by_index[i] or 0)
+		end
+	end)
+	step("quick slots", function()
+		for i = 1, 4 do exec_console_cmd("slot_" .. (i - 1) .. " " .. p.quick_slots[i]) end
+	end)
+	step("health", function()
+		if actor.set_health_ex then actor:set_health_ex(p.health) end
+	end)
+	step("limbs", function()
+		for _, kv in ipairs(p.limbs) do utils_obj.save_var(actor, kv[1], to_native(kv[2])) end
+	end)
+	if xrr_net_client then
+		step("stats", function() xrr_net_client.OnPeerStatsRestore(p.stats) end)
+		step("needs", function() xrr_net_client.OnPeerConditionRestore(p.needs) end)
+		step("progress", function() xrr_net_client.OnPeerProgressRestore() end)
+	end
+	step("m_data", function()
+		local surrogate = {}
+		for _, kv in ipairs(p.m_data) do surrogate[kv[1]] = to_native(kv[2]) end
+		xrr_peer_mdata_apply(surrogate)
+	end)
+end
+
+local function try_apply()
+	if not loaded_id then return end
+	local path = app_path(APPLY_PREFIX .. loaded_id .. ".bin")
+	local s = read_file(path)
+	if not s then return end
+	if s:sub(1, 4) ~= "SSAP" then
+		printe("![savesync] %s is not an apply file", path)
+		return
+	end
+	local r = R.new(s, 5)
+	r:u32()  -- format
+	r:lstr() -- save id
+	local p = decode_peer(s, r.p)
+
+	local me = get_console_cmd(0, "xrr_player_name") or ""
+	if p.name ~= me then
+		log("apply file is for '%s', not '%s'; skipping", p.name, me)
+		return
+	end
+
+	log("taking over this save as '%s' (%s items, money %s, rank %s)", p.name, #p.items, p.money, p.rank)
+	apply_character(p)
+	apply_items(p)
+	-- Only once: later loads of this save (or saves made from it) keep the result.
+	os.rename(path, path .. ".done")
+end
+
+local function on_load_state(m)
+	loaded_id = m.savesync_id
+end
+
+local function on_first_update()
+	if XrrIsClient and XrrIsClient() then return end
+	-- Let other mods finish their own first-update work first.
+	CreateTimeEvent("savesync", "apply", 2, function()
+		local ok, err = pcall(try_apply)
+		if not ok then printe("![savesync] apply failed: %s", tostring(err)) end
+		return true
+	end)
+end
+
 function on_game_start()
 	RegisterScriptCallback("save_state", on_save_state)
+	RegisterScriptCallback("load_state", on_load_state)
+	RegisterScriptCallback("actor_on_first_update", on_first_update)
 end

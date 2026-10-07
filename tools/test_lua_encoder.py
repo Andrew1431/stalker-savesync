@@ -17,6 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 lua = lupa.LuaRuntime(unpack_returned_tuples=True, encoding=None)
 lua.execute(open(ROOT / "lua/gamedata/scripts/savesync.script", "rb").read())
 encode_peer = lua.globals()[b"encode_peer"]
+decode_peer = lua.globals()[b"decode_peer"]
 
 
 def to_lua(v):
@@ -43,7 +44,11 @@ for f in sys.argv[1:]:
         xrr_peers.write_peer(w, p)
         expected = bytes(w.b)
         got = encode_peer(to_lua(p))
-        ok = got == expected
+        # Lua decoder: decode the original record bytes, re-encode in Lua.
+        orig = xrr_peers.Writer()
+        xrr_peers.write_peer(orig, p)
+        rec, _ = decode_peer(bytes(orig.b), 1)
+        ok = got == expected and encode_peer(rec) == expected
         bad += not ok
         where = "" if ok else f" (first diff at {next(i for i in range(min(len(got), len(expected))) if got[i] != expected[i]) if got[:len(expected)] != expected[:len(got)] else min(len(got), len(expected))})"
         print(f"{'OK  ' if ok else 'DIFF'} {p['name']:12} {len(expected):6} bytes{where}  {f}")
