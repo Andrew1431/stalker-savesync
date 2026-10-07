@@ -27,15 +27,24 @@ Done. Play like normal.
 - Older saves (made before you had savesync) work too, as long as you were in
   them. The first time, the game saves and reloads once by itself.
 
+## Linux (Proton/Wine)
+
+Same as above, but instead of double-clicking `install.bat`, open a terminal in
+the `stalker-savesync` folder and run:
+
+    bash install.sh
+
+To uninstall: `bash uninstall.sh`
+
 ## After an xrRazom update
 
-The update turns savesync off. Just double-click `install.bat` again.
+The update turns savesync off. Just run `install.bat` (or `install.sh`) again.
 
 ## Uninstall
 
 Close the game and double-click `uninstall.bat`. Your saves are not touched.
 
-## Manual install (if install.bat doesn't work, or on Linux)
+## Manual install (if the install script doesn't work)
 
 1. In `Anomaly\bin`, rename `steam_api64.dll` to `steam_api64_real.dll`.
    (Skip this if `steam_api64_real.dll` is already there: you're updating.)

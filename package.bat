@@ -10,9 +10,12 @@ mkdir "%STAGE%"
 copy /y build\steam_api64.dll "%STAGE%\savesync.dll" >nul
 copy /y dist\install.bat "%STAGE%\" >nul
 copy /y dist\uninstall.bat "%STAGE%\" >nul
+copy /y dist\install.sh "%STAGE%\" >nul
+copy /y dist\uninstall.sh "%STAGE%\" >nul
 copy /y lua\gamedata\scripts\savesync.script "%STAGE%\" >nul
 copy /y README.md "%STAGE%\README.txt" >nul
 
 if exist build\stalker-savesync.zip del build\stalker-savesync.zip
-powershell -NoProfile -Command "Compress-Archive -Path 'build\stage\stalker-savesync' -DestinationPath 'build\stalker-savesync.zip'" || exit /b 1
+rem tar (not Compress-Archive) so paths use forward slashes for Linux unzip.
+"%SystemRoot%\System32\tar.exe" -a -c -f build\stalker-savesync.zip -C build\stage stalker-savesync || exit /b 1
 echo Packaged build\stalker-savesync.zip
