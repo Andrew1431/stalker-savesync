@@ -563,18 +563,12 @@ end
 ------------------------------------------------------------------ save file plumbing
 
 local PEERS_VERSION = 15
-local LOADING_FILE = "savesync_loading.txt"
-
 local function my_name()
 	return get_console_cmd(0, "xrr_player_name") or ""
 end
 
 local function saves_dir()
 	return getFS():update_path("$game_saves$", "")
-end
-
-local function app_path(name)
-	return getFS():update_path("$app_data_root$", "") .. name
 end
 
 local function read_file(path)
@@ -595,6 +589,31 @@ end
 
 local function log(fmt, ...)
 	printf("[savesync] " .. fmt, ...)
+end
+
+-- Name of the save that was just loaded. Scripts aren't told, but the engine
+-- logs "* Game <name> is successfully loaded from file ..." (lowercased), so
+-- read it back from the newest log and match it to the real file name.
+local function loaded_save()
+	if flush then flush() end
+	local logs = getFS():file_list_open_ex("$logs$", bit_or(FS.FS_ListFiles, FS.FS_RootOnly), "*.log")
+	local newest, newest_modif
+	for i = 0, logs:Size() - 1 do
+		local f = logs:GetAt(i)
+		local modif = tonumber(f:Modif()) or 0
+		if not newest or modif > newest_modif then newest, newest_modif = f:NameFull(), modif end
+	end
+	local text = newest and read_file(getFS():update_path("$logs$", "") .. newest)
+	if not text then return nil end
+	local name
+	for n in text:gmatch("%* Game (.-) is successfully loaded from file") do name = n end
+	if not name then return nil end
+	local saves = getFS():file_list_open_ex("$game_saves$", bit_or(FS.FS_ListFiles, FS.FS_RootOnly), "*.scop")
+	for i = 0, saves:Size() - 1 do
+		local real = saves:GetAt(i):NameFull():gsub("%.scop$", "")
+		if real:lower() == name then return real end
+	end
+	return name
 end
 
 -- Newest save (by .scop time) as { name, modif }.
@@ -865,14 +884,11 @@ local function try_take_over(owner)
 	local me = my_name()
 	if me == "" or owner == "" or owner == me then return end
 
-	-- Which save was loaded: remembered from "load <name>", else the newest.
-	local name = read_file(app_path(LOADING_FILE))
-	write_file(app_path(LOADING_FILE), "")
-	if not name or name == "" then
-		local newest = newest_save()
-		name = newest and newest.name
+	local name = loaded_save()
+	if not name then
+		log("can't tell which save was loaded; not taking over")
+		return
 	end
-	if not name then return end
 
 	local path = saves_dir() .. name .. ".xrr_peers"
 	local peers, err = read_peers_string(read_file(path))
@@ -920,12 +936,7 @@ end
 
 local function on_console_execute(name, ...)
 	local arg = table.concat({ ... }, " ")
-	if name == "save" and arg ~= "" then
-		saving_name = arg
-	elseif name == "load" and arg ~= "" then
-		-- Lua restarts on load, so remember the name on disk.
-		write_file(app_path(LOADING_FILE), arg)
-	end
+	if name == "save" and arg ~= "" then saving_name = arg end
 end
 
 function on_game_start()

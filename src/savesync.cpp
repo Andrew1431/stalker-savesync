@@ -37,7 +37,7 @@
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 
-#define SAVESYNC_VERSION "1.3.1"
+#define SAVESYNC_VERSION "1.3.2"
 
 static constexpr int kSyncPort = 21331;
 static constexpr uint8_t kProtoVersion = 2;
