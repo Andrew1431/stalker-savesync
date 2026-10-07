@@ -37,7 +37,7 @@
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 
-#define SAVESYNC_VERSION "1.1.0"
+#define SAVESYNC_VERSION "1.1.1"
 
 static constexpr int kSyncPort = 21331;
 static constexpr uint8_t kProtoVersion = 2;
@@ -575,23 +575,10 @@ static void HandleEvents() {
     }
 
     for (auto& e : events) {
+        Log("event conn=%u listen=%u state=%d", e.conn, e.listen, e.state);
         bool closed = e.state == k_ESteamNetworkingConnectionState_ClosedByPeer ||
                       e.state == k_ESteamNetworkingConnectionState_ProblemDetectedLocally;
-        if (e.listen == g_listen && e.listen != k_HSteamListenSocket_Invalid) {
-            // Someone joined our sync port: we're the host.
-            if (e.state == k_ESteamNetworkingConnectionState_Connecting) {
-                S.AcceptConnection(g_sockets, e.conn);
-            } else if (e.state == k_ESteamNetworkingConnectionState_Connected) {
-                std::string name = S.GetFriendPersonaName(g_friends, e.steamId);
-                Log("player '%s' connected for save sync", name.c_str());
-                g_peers.insert(e.conn);
-                g_peersNeedingLatest.insert(e.conn);
-            } else if (closed) {
-                g_peers.erase(e.conn);
-                g_peersNeedingLatest.erase(e.conn);
-                S.CloseConnection(g_sockets, e.conn, 0, nullptr, false);
-            }
-        } else if (e.conn == g_hostConn) {
+        if (e.conn == g_hostConn && g_hostConn != k_HSteamNetConnection_Invalid) {
             if (e.state == k_ESteamNetworkingConnectionState_Connected) {
                 g_reconnects = 0;
                 Log("connected to host for save sync");
@@ -603,6 +590,23 @@ static void HandleEvents() {
                 if (g_reconnects >= kMaxReconnects)
                     Log("host isn't answering (do they have savesync installed?)");
             }
+            continue;
+        }
+        // Our callback is only attached to our own sockets, so anything else is a
+        // player connecting to our sync port. Don't trust e.listen: under Proton the
+        // callback struct may not carry it.
+        if (e.state == k_ESteamNetworkingConnectionState_Connecting) {
+            int r = S.AcceptConnection(g_sockets, e.conn);
+            Log("accepting sync connection %u (result %d)", e.conn, r);
+        } else if (e.state == k_ESteamNetworkingConnectionState_Connected) {
+            std::string name = S.GetFriendPersonaName(g_friends, e.steamId);
+            Log("player '%s' connected for save sync", name.c_str());
+            g_peers.insert(e.conn);
+            g_peersNeedingLatest.insert(e.conn);
+        } else if (closed) {
+            g_peers.erase(e.conn);
+            g_peersNeedingLatest.erase(e.conn);
+            S.CloseConnection(g_sockets, e.conn, 0, nullptr, false);
         }
     }
 }
