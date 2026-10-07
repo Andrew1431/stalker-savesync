@@ -603,8 +603,9 @@ local function newest_save()
 	local best
 	for i = 0, list:Size() - 1 do
 		local f = list:GetAt(i)
-		if not best or f:Modif() > best.modif then
-			best = { name = (f:NameFull():gsub("%.scop$", "")), modif = f:Modif() }
+		local modif = tonumber(f:Modif()) or 0 -- the engine hands it over as a string
+		if not best or modif > best.modif then
+			best = { name = (f:NameFull():gsub("%.scop$", "")), modif = modif }
 		end
 	end
 	return best
@@ -687,7 +688,7 @@ local function on_save_state()
 	-- The engine and xrRazom write the files after this callback; patch once the
 	-- save is on disk.
 	local started, tries = os.time(), 0
-	CreateTimeEvent("savesync", "patch_save", 1, function()
+	local function step()
 		tries = tries + 1
 		local name = saving_name
 		if not name then
@@ -702,6 +703,15 @@ local function on_save_state()
 		end
 		saving_name = nil
 		return true
+	end
+	CreateTimeEvent("savesync", "patch_save", 1, function()
+		local ok, done = pcall(step)
+		if not ok then
+			printe("![savesync] after-save check failed: %s", tostring(done))
+			saving_name = nil
+			return true
+		end
+		return done
 	end)
 end
 
